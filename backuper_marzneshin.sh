@@ -48,14 +48,14 @@ function install_backuper() {
     echo
     echo "Select Backup Interval:"
     echo "1) 1 min"
-    echo "2) 10 min"
+    echo "2) 5 min"
     echo "3) 1 hour"
     echo "4) 1:30 hours"
     read -p "Choose (1-4): " TIME_OPT
 
     case $TIME_OPT in
         1) CRON_TIME="*/1 * * * *" ;;
-        2) CRON_TIME="*/10 * * * *" ;;
+        2) CRON_TIME="*/5 * * * *" ;;
         3) CRON_TIME="0 */1 * * *" ;;
         4) CRON_TIME="*/30 */1 * * *" ;;
         *) CRON_TIME="0 */1 * * *" ;;
