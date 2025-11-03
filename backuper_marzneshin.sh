@@ -139,9 +139,10 @@ fi
 # ==============================
 if [ -f "$ARCHIVE" ]; then
     FILE_SIZE_MB=$(du -m "$ARCHIVE" | cut -f1)
-    echo "Total size file: $FILE_SIZE_MB MB"
+    echo "✅ Backup created successfully: $ARCHIVE"
+    echo "📦 File size: $FILE_SIZE_MB MB"
 else
-    echo "Backup file not created!"
+    echo "❌ Backup file not created!"
     exit 1
 fi
 
