@@ -30,16 +30,12 @@ function install_backuper() {
     echo "1) zip"
     echo "2) tgz"
     echo "3) 7z"
-    echo "4) XZ"
-    echo "5) ZSTD"
     read -p "Choose (1-5): " COMP_TYPE_OPT
 
     case $COMP_TYPE_OPT in
        1) COMP_TYPE="zip" ;;
        2) COMP_TYPE="tgz" ;;
        3) COMP_TYPE="7z" ;;
-       4) COMP_TYPE="xz" ;;
-       5) COMP_TYPE="zstd" ;;
         *) echo "Invalid choice. Default: zip"; COMP_TYPE="zip" ;;
     esac
 
@@ -118,14 +114,6 @@ elif [ "$COMP_TYPE" == "tgz" ]; then
 elif [ "$COMP_TYPE" == "7z" ]; then
     ARCHIVE="$OUTPUT_BASE.7z"
     7z a -t7z -m0=lzma2 -mx=9 -mfb=256 -md=1536m -ms=on "$ARCHIVE" .
-
-elif [ "$COMP_TYPE" == "xz" ]; then
-    ARCHIVE="$OUTPUT_BASE.tar.xz"
-    tar -cf - . | xz -9 -T0 -c > "$ARCHIVE"
-
-elif [ "$COMP_TYPE" == "zstd" ]; then
-    ARCHIVE="$OUTPUT_BASE.tar.zst"
-    tar -cf - . | zstd -19 -T0 -o "$ARCHIVE"
 
 else
     ARCHIVE="$OUTPUT_BASE.zip"
