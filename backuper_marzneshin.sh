@@ -125,13 +125,9 @@ elif [ "$COMP_TYPE" == "tar" ]; then
     ARCHIVE="$OUTPUT_BASE.tar"
     tar -cf "$ARCHIVE" .
 
-elif [ "$COMP_TYPE" == "gzip" ]; then
+elif [ "$COMP_TYPE" == "gzip" ] || [ "$COMP_TYPE" == "gz" ]; then
     ARCHIVE="$OUTPUT_BASE.gz"
     tar -cf - . | gzip > "$ARCHIVE"
-
-elif [ "$COMP_TYPE" == "gz" ]; then
-    ARCHIVE="$OUTPUT_BASE.gz"
-    gzip -r .
 
 else
     ARCHIVE="$OUTPUT_BASE.zip"
