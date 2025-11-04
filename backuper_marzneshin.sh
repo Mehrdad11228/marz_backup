@@ -16,144 +16,115 @@ function install_requirements() {
     apt install sshpass -y
     apt install xz-utils zstd -y
 }
+# ----- Detect Database Type -----
+function detect_db_type() {
+    local docker_file="/etc/opt/marzneshin/docker-compose.yml"
+    if [[ ! -f "$docker_file" ]]; then
+        echo "docker-compose.yml not found. Assuming SQLite."
+        echo "sqlite"
+        return
+    fi
+
+    local db_url=$(grep -i "SQLALCHEMY_DATABASE_URL" "$docker_file" | head -1 | cut -d'"' -f2 | cut -d"'" -f2)
+    if [[ -z "$db_url" ]]; then
+        echo "SQLALCHEMY_DATABASE_URL not found. Assuming SQLite."
+        echo "sqlite"
+        return
+    fi
+
+    if [[ "$db_url" == sqlite* ]]; then
+        echo "sqlite"
+    elif [[ "$db_url" == *"mysql"* ]] && [[ "$db_url" != *"mariadb"* ]]; then
+        echo "mysql"
+    elif [[ "$db_url" == *"mariadb"* ]] || grep -q "MARIADB_ROOT_PASSWORD" "$docker_file"; then
+        echo "mariadb"
+    else
+        echo "sqlite"
+    fi
+}
 
 # ----- Install Backuper -----
 function install_backuper() {
-    clear
-    echo "---- Backuper Installation ----"
-    read -p "Enter Telegram Bot Token: " BOT_TOKEN
-    read -p "Enter Telegram Chat ID: " CHAT_ID
-
+while true; do
+        clear
+        echo "========================================="
+        echo " Select backup type"
+        echo "========================================="
+        echo
+        echo "1) Marzneshin"
+        echo
+        echo "-----------------------------------------"
+        read -p "Choose an option: " PANEL_OPTION
+        [[ -z "$PANEL_OPTION" ]] && { echo "No option selected."; sleep 1; return; }
+        [[ "$PANEL_OPTION" == "1" ]] && { PANEL_TYPE="Marzneshin"; break; }
+        echo "Invalid choice. Try again."; sleep 1
+    done
+clear
+    echo "Selected Panel: $PANEL_TYPE"
     echo
-    echo "Select Compression Type:"
+
+# Step 1 - Bot Token
+    echo "Step 1 - Enter Telegram Bot Token"
+    read -p "Token Telegram: " BOT_TOKEN
+    [[ -z "$BOT_TOKEN" ]] && { echo "Token cannot be empty."; sleep 1; return; }
+
+    # Step 2 - Chat ID
+    echo -e "\nStep 2 - Enter Chat ID"
+    read -p "Chat ID: " CHAT_ID
+    [[ -z "$CHAT_ID" ]] && { echo "Chat ID cannot be empty."; sleep 1; return; }
+
+    # Step 3 - Compression Type
+    echo -e "\nStep 3 - Select Compression Type"
+    echo "File Type:"
     echo "1) zip"
     echo "2) tgz"
     echo "3) 7z"
     echo "4) tar"
     echo "5) gzip"
     echo "6) gz"
-    read -p "Choose (1-5): " COMP_TYPE_OPT
-
+    read -p "Choose (1-6): " COMP_TYPE_OPT
     case $COMP_TYPE_OPT in
-       1) COMP_TYPE="zip" ;;
-       2) COMP_TYPE="tgz" ;;
-       3) COMP_TYPE="7z" ;;
-       4) COMP_TYPE="tar" ;;
-       5) COMP_TYPE="gzip" ;;
-       6) COMP_TYPE="gz" ;;
-        *) echo "Invalid choice. Default: zip"; COMP_TYPE="zip" ;;
+        1) COMP_TYPE="zip" ;;
+        2) COMP_TYPE="tgz" ;;
+        3) COMP_TYPE="7z" ;;
+        4) COMP_TYPE="tar" ;;
+        5) COMP_TYPE="gzip" ;;
+        6) COMP_TYPE="gz" ;;
+        *) COMP_TYPE="zip"; echo "Invalid. Default: zip" ;;
     esac
 
-    read -p "Enter file caption: " CAPTION
+    # Step 4 - Caption
+    echo -e "\nStep 4 - Enter File Caption"
+    read -p "Caption File: " CAPTION
+    [[ -z "$CAPTION" ]] && CAPTION="Marzneshin Backup - $(date +"%Y-%m-%d %H:%M")"
 
-    echo
-    echo "Select Backup Interval:"
+    # Step 5 - Backup Interval
+    echo -e "\nStep 5 - Select Backup Interval"
+    echo "Time Backup:"
     echo "1) 1 min"
     echo "2) 5 min"
     echo "3) 1 hour"
     echo "4) 1:30 hours"
     read -p "Choose (1-4): " TIME_OPT
-
     case $TIME_OPT in
         1) CRON_TIME="*/1 * * * *" ;;
         2) CRON_TIME="*/5 * * * *" ;;
         3) CRON_TIME="0 */1 * * *" ;;
         4) CRON_TIME="*/30 */1 * * *" ;;
-        *) CRON_TIME="0 */1 * * *" ;;
+        *) CRON_TIME="0 */1 * * *"; echo "Default: 1 hour" ;;
     esac
 
-    BACKUP_SCRIPT="/root/marz_backup.sh"
-    BACKUP_DIR="/root/backuper_marzneshin"
+    # Step 6 - Detect Database
+    echo -e "\nStep 6 - Detecting Database Type"
+    DB_TYPE=$(detect_db_type)
+    case $DB_TYPE in
+        sqlite)   echo "SQLite detected." ;;
+        mysql)    echo "MySQL detected." ;;
+        mariadb)  echo "MariaDB detected." ;;
+    esac
 
-    # Create backup script
-    cat > $BACKUP_SCRIPT <<'EOF'
-#!/bin/bash
-BACKUP_DIR="/root/backuper_marzneshin"
-BOT_TOKEN="__BOT_TOKEN__"
-CHAT_ID="__CHAT_ID__"
-CAPTION="__CAPTION__"
-COMP_TYPE="__COMP_TYPE__"
-DATE=$(date +"%Y-%m-%d_%H-%M-%S")
-OUTPUT_BASE="$BACKUP_DIR/backup_$DATE"
-
-mkdir -p "$BACKUP_DIR"
-cd "$BACKUP_DIR"
-
-# Copy paths
-mkdir -p etc_opt var_lib_marznode var_lib_marzneshin
-cp -r /etc/opt/marzneshin/ etc_opt/ 2>/dev/null
-cp -r /var/lib/marznode/ var_lib_marznode/ 2>/dev/null
-rsync -a --exclude='mysql' /var/lib/marzneshin/ var_lib_marzneshin/ 2>/dev/null
-
-# ----- MySQL Backup -----
-DOCKER_COMPOSE="/etc/opt/marzneshin/docker-compose.yml"
-if [ -f "$DOCKER_COMPOSE" ]; then
-    DB_PASS=$(grep 'MARIADB_ROOT_PASSWORD:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
-    DB_NAME=$(grep 'MARIADB_DATABASE:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
-    DB_USER="root"
-
-    if [ -n "$DB_PASS" ] && [ -n "$DB_NAME" ]; then
-        echo "Backing up MySQL database..."
-        mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$BACKUP_DIR/marzneshin_backup.sql"
-        echo "MySQL backup completed."
-    else
-        echo "MySQL credentials not found in docker-compose.yml"
-    fi
-else
-    echo "docker-compose.yml not found. Skipping MySQL backup."
-fi
-
-# ==============================
-# Compression Section
-# ==============================
-ARCHIVE="$OUTPUT_BASE"
-
-if [ "$COMP_TYPE" == "zip" ]; then
-    ARCHIVE="$OUTPUT_BASE.zip"
-    zip -r "$ARCHIVE" .
-
-elif [ "$COMP_TYPE" == "tgz" ]; then
-    ARCHIVE="$OUTPUT_BASE.tgz"
-    tar -czf "$ARCHIVE" .
-
-elif [ "$COMP_TYPE" == "7z" ]; then
-    ARCHIVE="$OUTPUT_BASE.7z"
-    7z a -t7z -m0=lzma2 -mx=9 -mfb=256 -md=1536m -ms=on "$ARCHIVE" .
-
-elif [ "$COMP_TYPE" == "tar" ]; then
-    ARCHIVE="$OUTPUT_BASE.tar"
-    tar -cf "$ARCHIVE" .
-
-elif [ "$COMP_TYPE" == "gzip" ] || [ "$COMP_TYPE" == "gz" ]; then
-    ARCHIVE="$OUTPUT_BASE.gz"
-    tar -cf - . | gzip > "$ARCHIVE"
-
-else
-    ARCHIVE="$OUTPUT_BASE.zip"
-    zip -r "$ARCHIVE" .
-fi
-
-# ==============================
-# File size check and Telegram send
-# ==============================
-if [ -f "$ARCHIVE" ]; then
-    FILE_SIZE_MB=$(du -m "$ARCHIVE" | cut -f1)
-    echo "✅ Backup created successfully: $ARCHIVE"
-    echo "📦 File size: $FILE_SIZE_MB MB"
-else
-    echo "❌ Backup file not created!"
-    exit 1
-fi
-
-if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
-    curl -s -F chat_id="$CHAT_ID" -F caption="$CAPTION" -F document=@"$ARCHIVE" https://api.telegram.org/bot$BOT_TOKEN/sendDocument
-    echo "Backup successfully sent to Telegram!"
-else
-    echo "Telegram token or chat ID not set. Skipping send."
-fi
-
-rm -rf "$BACKUP_DIR"/*
-EOF
+    # Create script based on DB type
+    create_backup_script "$DB_TYPE"
 
     # Replace dynamic variables
     sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" $BACKUP_SCRIPT
