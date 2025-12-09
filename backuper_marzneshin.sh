@@ -8,7 +8,29 @@ function install_requirements() {
     apt install zip unzip tar gzip p7zip-full mariadb-client sshpass xz-utils zstd postgresql-client-common -y
 }
 
-# ----- Detect Database Type Marzneshin-----
+# ----- Detect Database Type Pasarguard -----
+function detect_db_type_pasarguard() {
+    local env_file="/opt/pasarguard/.env"
+    [[ ! -f "$env_file" ]] && { echo ".env not found."; echo ""; return; }
+
+    local db_url
+    db_url=$(grep -E '^SQLALCHEMY_DATABASE_URL=' "$env_file" | tail -n1 | cut -d'=' -f2- | tr -d "\"'")
+    db_url=$(echo "$db_url" | xargs)
+    [[ -z "$db_url" ]] && { echo "SQLALCHEMY_DATABASE_URL not found."; echo ""; return; }
+
+    if [[ "$db_url" == postgresql* ]]; then
+        echo "postgresql"
+    elif [[ "$db_url" == mysql* || "$db_url" == *"mysql+"* || "$db_url" == *"mysql://"* ]]; then
+        echo "mysql"
+    elif [[ "$db_url" == *"mariadb"* ]]; then
+        echo "mariadb"
+    else
+        echo "Unsupported DB URL: $db_url"
+        echo ""
+    fi
+}
+
+# ----- Detect Database Type Marzneshin -----
 function detect_db_type() {
     local docker_file="/etc/opt/marzneshin/docker-compose.yml"
     if [[ ! -f "$docker_file" ]]; then
@@ -17,7 +39,8 @@ function detect_db_type() {
         return
     fi
 
-    local db_url=$(grep -i "SQLALCHEMY_DATABASE_URL" "$docker_file" | head -1 | cut -d'"' -f2 | cut -d"'" -f2)
+    local db_url
+    db_url=$(grep -i "SQLALCHEMY_DATABASE_URL" "$docker_file" | head -1 | cut -d'"' -f2 | cut -d"'" -f2)
     if [[ -z "$db_url" ]]; then
         echo "SQLALCHEMY_DATABASE_URL not found. Assuming SQLite."
         echo "sqlite"
@@ -35,7 +58,7 @@ function detect_db_type() {
     fi
 }
 
-# ----- Create Backup Script Based on DB Type Marzneshin-----
+# ----- Create Backup Script Based on DB Type Marzneshin -----
 function create_backup_script() {
     local db_type="$1"
     local script_file="/root/marz_backup.sh"
@@ -165,6 +188,140 @@ EOF
     chmod +x "$script_file"
 }
 
+# ----- Create Backup Script Based on DB Type Pasarguard -----
+function create_backup_script_pasarguard() {
+    local db_type="$1"
+    local script_file="/root/pasarguard_backup.sh"
+    local backup_dir="/root/backuper_pasarguard"
+
+    cat > "$script_file" <<'EOF'
+#!/bin/bash
+BACKUP_DIR="/root/backuper_pasarguard"
+BOT_TOKEN="__BOT_TOKEN__"
+CHAT_ID="__CHAT_ID__"
+CAPTION="__CAPTION__"
+COMP_TYPE="__COMP_TYPE__"
+DATE=$(date +"%Y-%m-%d_%H-%M-%S")
+OUTPUT_BASE="$BACKUP_DIR/backup_$DATE"
+ARCHIVE=""
+mkdir -p "$BACKUP_DIR"
+cd "$BACKUP_DIR" || exit 1
+
+# Copy paths Pasarguard
+mkdir -p opt/pasarguard opt/pg-node var/lib/pasarguard var/lib/pg-node
+rsync -a /opt/pasarguard/   opt/pasarguard/   2>/dev/null || true
+rsync -a /opt/pg-node/      opt/pg-node/      2>/dev/null || true
+rsync -a /var/lib/pasarguard/ var/lib/pasarguard/ 2>/dev/null || true
+rsync -a /var/lib/pg-node/    var/lib/pg-node/    2>/dev/null || true
+
+# ==============================
+# Database Backup Section Pasarguard
+# ==============================
+DB_BACKUP_DONE=0
+ENV_FILE="/opt/pasarguard/.env"
+
+parse_db_url() {
+    local url="$1"
+    url="${url#*://}"
+    local creds="${url%%@*}"
+    local hostdb="${url#*@}"
+    local user="${creds%%:*}"
+    local pass="${creds#*:}"; pass="${pass%%@*}"
+    local hostport="${hostdb%%/*}"
+    local dbname="${hostdb#*/}"
+    local host="${hostport%%:*}"
+    local port="${hostport##*:}"
+    echo "$user" "$pass" "$host" "$port" "$dbname"
+}
+
+if [ -f "$ENV_FILE" ]; then
+    DB_URL=$(grep -E '^SQLALCHEMY_DATABASE_URL=' "$ENV_FILE" | tail -n1 | cut -d'=' -f2- | tr -d "\"'" | xargs)
+    if [ -n "$DB_URL" ]; then
+        DB_PROTO=$(echo "$DB_URL" | cut -d':' -f1)
+        read DB_USER DB_PASS DB_HOST DB_PORT DB_NAME < <(parse_db_url "$DB_URL")
+        # fallbacks
+        : "${DB_USER:=pasarguard}"
+        : "${DB_NAME:=pasarguard}"
+        if [[ "$DB_PROTO" == postgresql* ]]; then
+            : "${DB_PORT:=5432}"
+            echo "Backing up PostgreSQL database..."
+            PGPASSWORD="$DB_PASS" pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -F c "$DB_NAME" > "$BACKUP_DIR/pasarguard_backup.dump" 2>/dev/null && DB_BACKUP_DONE=1
+            [ $DB_BACKUP_DONE -eq 1 ] && echo "PostgreSQL backup completed." || echo "PostgreSQL backup failed."
+        elif [[ "$DB_PROTO" == mysql* || "$DB_PROTO" == mariadb* ]]; then
+            : "${DB_PORT:=3306}"
+            echo "Backing up MariaDB/MySQL database..."
+            mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" \
+                --single-transaction --routines --triggers --events --skip-lock-tables \
+                "$DB_NAME" > "$BACKUP_DIR/pasarguard_backup.sql" 2>/dev/null && DB_BACKUP_DONE=1
+            [ $DB_BACKUP_DONE -eq 1 ] && echo "MariaDB/MySQL backup completed." || echo "MariaDB/MySQL backup failed."
+        else
+            echo "Unsupported DB protocol: $DB_PROTO"
+        fi
+    else
+        echo "SQLALCHEMY_DATABASE_URL not found. Skipping DB backup."
+    fi
+else
+    echo ".env not found. Skipping DB backup."
+fi
+
+# ==============================
+# Compression Section
+# ==============================
+ARCHIVE="$OUTPUT_BASE"
+if [ "$COMP_TYPE" == "zip" ]; then
+    ARCHIVE="$OUTPUT_BASE.zip"
+    zip -r "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "tgz" ]; then
+    ARCHIVE="$OUTPUT_BASE.tgz"
+    tar -czf "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "7z" ]; then
+    ARCHIVE="$OUTPUT_BASE.7z"
+    7z a -t7z -m0=lzma2 -mx=9 -mfb=256 -md=1536m -ms=on "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "tar" ]; then
+    ARCHIVE="$OUTPUT_BASE.tar"
+    tar -cf "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "gzip" ] || [ "$COMP_TYPE" == "gz" ]; then
+    ARCHIVE="$OUTPUT_BASE.tar.gz"
+    tar -cf - . | gzip > "$ARCHIVE"
+else
+    ARCHIVE="$OUTPUT_BASE.zip"
+    zip -r "$ARCHIVE" . > /dev/null
+fi
+
+# ==============================
+# File size check & Telegram send
+# ==============================
+if [ ! -f "$ARCHIVE" ]; then
+    echo "Backup file not created!"
+    rm -rf "$BACKUP_DIR"/*
+    exit 1
+fi
+
+FILE_SIZE_MB=$(du -m "$ARCHIVE" | cut -f1)
+echo "Backup created: $ARCHIVE ($FILE_SIZE_MB MB)"
+
+# Send to Telegram
+if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+    CAPTION_WITH_SIZE="$CAPTION\nTotal size: ${FILE_SIZE_MB} MB"
+    if [ "$FILE_SIZE_MB" -gt 50 ]; then
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+             -d chat_id="$CHAT_ID" \
+             -d text="Warning: Backup file > 50MB (${FILE_SIZE_MB} MB). Telegram may not accept it." >/dev/null
+    fi
+    curl -s -F chat_id="$CHAT_ID" -F caption="$CAPTION_WITH_SIZE" -F document=@"$ARCHIVE" \
+         "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" >/dev/null && \
+         echo "Backup successfully sent to Telegram!" || echo "Failed to send via Telegram."
+else
+    echo "Telegram credentials missing. Skipping send."
+fi
+
+# Cleanup
+rm -rf "$BACKUP_DIR"/*
+EOF
+
+    chmod +x "$script_file"
+}
+
 # ----- Install Backuper -----
 function install_backuper() {
     while true; do
@@ -174,12 +331,16 @@ function install_backuper() {
         echo "========================================="
         echo
         echo "1) Marzneshin"
+        echo "2) Pasarguard"
         echo
         echo "-----------------------------------------"
         read -p "Choose an option: " PANEL_OPTION
         [[ -z "$PANEL_OPTION" ]] && { echo "No option selected."; sleep 1; return; }
-        [[ "$PANEL_OPTION" == "1" ]] && { PANEL_TYPE="Marzneshin"; break; }
-        echo "Invalid choice. Try again."; sleep 1
+        case "$PANEL_OPTION" in
+            1) PANEL_TYPE="Marzneshin"; break ;;
+            2) PANEL_TYPE="Pasarguard"; break ;;
+            *) echo "Invalid choice. Try again."; sleep 1 ;;
+        esac
     done
 
     clear
@@ -216,10 +377,12 @@ function install_backuper() {
         *) COMP_TYPE="zip"; echo "Invalid. Default: zip" ;;
     esac
 
-    # Step 4 - Caption
+    [[ "$PANEL_TYPE" == "Marzneshin" ]] && DEFAULT_CAPTION="Marzneshin Backup - $(date +"%Y-%m-%d %H:%M")"
+    [[ "$PANEL_TYPE" == "Pasarguard" ]] && DEFAULT_CAPTION="Pasarguard Backup - $(date +"%Y-%m-%d %H:%M")"
+
     echo -e "\nStep 4 - Enter File Caption"
     read -p "Caption File: " CAPTION
-    [[ -z "$CAPTION" ]] && CAPTION="Marzneshin Backup - $(date +"%Y-%m-%d %H:%M")"
+    [[ -z "$CAPTION" ]] && CAPTION="$DEFAULT_CAPTION"
 
     # Step 5 - Backup Interval
     echo -e "\nStep 5 - Select Backup Interval"
@@ -237,35 +400,57 @@ function install_backuper() {
         *) CRON_TIME="0 */1 * * *"; echo "Default: 1 hour" ;;
     esac
 
-    # Step 6 - Detect Database
-    echo -e "\nStep 6 - Detecting Database Type"
-    DB_TYPE=$(detect_db_type)
-    case $DB_TYPE in
-        sqlite)   echo "SQLite detected." ;;
-        mysql)    echo "MySQL detected." ;;
-        mariadb)  echo "MariaDB detected." ;;
-    esac
+    # Step 6 - Detect Database + build scripts
+    if [[ "$PANEL_TYPE" == "Pasarguard" ]]; then
+        echo -e "\nStep 6 - Detecting Database Type (Pasarguard)"
+        DB_TYPE=$(detect_db_type_pasarguard)
+        case $DB_TYPE in
+            postgresql) echo "Pasarguard: PostgreSQL detected." ;;
+            mariadb|mysql) echo "Pasarguard: MariaDB/MySQL detected." ;;
+            "")         echo "DB type not found. Aborting."; return ;;
+            *)          echo "Unsupported DB type. Aborting."; return ;;
+        esac
 
-    # Create script based on DB type
-    create_backup_script "$DB_TYPE"
+        create_backup_script_pasarguard "$DB_TYPE"
+        sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" /root/pasarguard_backup.sh
+        sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/pasarguard_backup.sh
+        sed -i "s|__CAPTION__|$CAPTION|g" /root/pasarguard_backup.sh
+        sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/pasarguard_backup.sh
 
-    # Replace variables
-    sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" /root/marz_backup.sh
-    sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/marz_backup.sh
-    sed -i "s|__CAPTION__|$CAPTION|g" /root/marz_backup.sh
-    sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/marz_backup.sh
+        (crontab -l 2>/dev/null | grep -v "pasarguard_backup.sh"; echo "$CRON_TIME bash /root/pasarguard_backup.sh") | crontab -
 
-    # Set cron job
-    (crontab -l 2>/dev/null | grep -v "marz_backup.sh"; echo "$CRON_TIME bash /root/marz_backup.sh") | crontab -
+        echo -e "\nStep 7 - Running first backup..."
+        bash /root/pasarguard_backup.sh
 
-    # Step 7 - Run first backup
-    echo -e "\nStep 7 - Running first backup..."
-    bash /root/marz_backup.sh
+        echo -e "\nBackup successfully sent"
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+             -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
 
-    # Success message
-    echo -e "\nBackup successfully sent"
-    curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-         -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
+    else
+        echo -e "\nStep 6 - Detecting Database Type"
+        DB_TYPE=$(detect_db_type)
+        case $DB_TYPE in
+            sqlite)   echo "SQLite detected." ;;
+            mysql)    echo "MySQL detected." ;;
+            mariadb)  echo "MariaDB detected." ;;
+            *) echo "DB type unknown/unsupported. Aborting."; return ;;
+        esac
+
+        create_backup_script "$DB_TYPE"
+        sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" /root/marz_backup.sh
+        sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/marz_backup.sh
+        sed -i "s|__CAPTION__|$CAPTION|g" /root/marz_backup.sh
+        sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/marz_backup.sh
+
+        (crontab -l 2>/dev/null | grep -v "marz_backup.sh"; echo "$CRON_TIME bash /root/marz_backup.sh") | crontab -
+
+        echo -e "\nStep 7 - Running first backup..."
+        bash /root/marz_backup.sh
+
+        echo -e "\nBackup successfully sent"
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+             -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
+    fi
 
     read -p "Press Enter to return to menu..."
 }
@@ -274,9 +459,9 @@ function install_backuper() {
 function remove_backuper() {
     clear
     echo "Removing Backuper..."
-    rm -f /root/marz_backup.sh
-    rm -rf /root/backuper_marzneshin
-    crontab -l 2>/dev/null | grep -v 'marz_backup.sh' | crontab -
+    rm -f /root/marz_backup.sh /root/pasarguard_backup.sh
+    rm -rf /root/backuper_marzneshin /root/backuper_pasarguard
+    crontab -l 2>/dev/null | grep -v 'marz_backup.sh' | grep -v 'pasarguard_backup.sh' | crontab -
     echo "Backuper removed successfully."
     read -p "Press Enter to return..."
 }
@@ -286,13 +471,15 @@ function run_script() {
     clear
     if [[ -f /root/marz_backup.sh ]]; then
         bash /root/marz_backup.sh
+    elif [[ -f /root/pasarguard_backup.sh ]]; then
+        bash /root/pasarguard_backup.sh
     else
         echo "Backup script not found. Install first."
     fi
     read -p "Press Enter to return..."
 }
 
-# ----- Transfer Backup -----
+# ----- Transfer Backup (Marzneshin only) -----
 function transfer_backup() {
     clear
     echo "========================================="
@@ -311,10 +498,7 @@ function transfer_backup() {
     read -s -p "Password Server [Client]: " REMOTE_PASS
     echo
 
-    # ==============================
-    # Check Required Directories Marzneshin - ALL CRITICAL
-    # ==============================
-
+    # Check Required Directories
     MISSING_DIRS=()
     [[ ! -d "/etc/opt/marzneshin" ]] && MISSING_DIRS+=("/etc/opt/marzneshin")
     [[ ! -d "/var/lib/marzneshin" ]] && MISSING_DIRS+=("/var/lib/marzneshin")
@@ -339,10 +523,7 @@ function transfer_backup() {
     echo "All required directories found."
     echo
 
-    # ==============================
-    # Detect Database Type Marzneshin
-    # ==============================
-
+    # Detect Database Type
     DB_TYPE=$(detect_db_type)
     case $DB_TYPE in
         sqlite)
@@ -385,13 +566,9 @@ EOF
 
     echo
 
-    # ==============================
-    # Build & Run Transfer Script
-    # ==============================
-
     TRANSFER_SCRIPT="/root/Transfer_backup.sh"
 
-    cat > "$TRANSFER_SCRIPT" << EOF
+cat > "$TRANSFER_SCRIPT" <<'EOF'
 #!/bin/bash
 echo "Starting transfer backup..."
 echo "Date: \$(date '+%Y-%m-%d %H:%M:%S')"
