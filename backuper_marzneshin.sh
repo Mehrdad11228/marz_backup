@@ -328,6 +328,88 @@ EOF
     chmod +x "$script_file"
 }
 
+# ----- Create Backup Script Based on DB Type X-UI -----
+function create_backup_script_x-ui() {
+    local db_type="$1"
+    local script_file="/root/x-ui_backup.sh"
+    local backup_dir="/root/backuper_x-ui"
+
+    cat > "$script_file" <<'EOF'
+#!/bin/bash
+BACKUP_DIR="/root/backuper_x-ui"
+BOT_TOKEN="__BOT_TOKEN__"
+CHAT_ID="__CHAT_ID__"
+CAPTION="__CAPTION__"
+COMP_TYPE="__COMP_TYPE__"
+DATE=$(date +"%Y-%m-%d_%H-%M-%S")
+OUTPUT_BASE="$BACKUP_DIR/backup_$DATE"
+ARCHIVE=""
+mkdir -p "$BACKUP_DIR"
+cd "$BACKUP_DIR" || exit 1
+
+# Copy paths X-UI (contents only)
+mkdir -p etc/x-ui root/cert/
+rsync -a /etc/x-ui/ etc/x-ui/ 2>/dev/null || true
+cp -a /root/cert/. root/cert/ 2>/dev/null || true
+
+# ==============================
+# Compression Section
+# ==============================
+ARCHIVE="$OUTPUT_BASE"
+if [ "$COMP_TYPE" == "zip" ]; then
+    ARCHIVE="$OUTPUT_BASE.zip"
+    zip -r "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "tgz" ]; then
+    ARCHIVE="$OUTPUT_BASE.tgz"
+    tar -czf "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "7z" ]; then
+    ARCHIVE="$OUTPUT_BASE.7z"
+    7z a -t7z -m0=lzma2 -mx=9 -mfb=256 -md=1536m -ms=on "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "tar" ]; then
+    ARCHIVE="$OUTPUT_BASE.tar"
+    tar -cf "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "gzip" ] || [ "$COMP_TYPE" == "gz" ]; then
+    ARCHIVE="$OUTPUT_BASE.tar.gz"
+    tar -cf - . | gzip > "$ARCHIVE"
+else
+    ARCHIVE="$OUTPUT_BASE.zip"
+    zip -r "$ARCHIVE" . > /dev/null
+fi
+
+# ==============================
+# File size check & Telegram send
+# ==============================
+if [ ! -f "$ARCHIVE" ]; then
+    echo "Backup file not created!"
+    rm -rf "$BACKUP_DIR"/*
+    exit 1
+fi
+
+FILE_SIZE_MB=$(du -m "$ARCHIVE" | cut -f1)
+echo "Backup created: $ARCHIVE ($FILE_SIZE_MB MB)"
+
+# Send to Telegram
+if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+    CAPTION_WITH_SIZE="$CAPTION\nTotal size: ${FILE_SIZE_MB} MB"
+    if [ "$FILE_SIZE_MB" -gt 50 ]; then
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+             -d chat_id="$CHAT_ID" \
+             -d text="Warning: Backup file > 50MB (${FILE_SIZE_MB} MB). Telegram may not accept it." >/dev/null
+    fi
+    curl -s -F chat_id="$CHAT_ID" -F caption="$CAPTION_WITH_SIZE" -F document=@"$ARCHIVE" \
+         "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" >/dev/null && \
+         echo "Backup successfully sent to Telegram!" || echo "Failed to send via Telegram."
+else
+    echo "Telegram credentials missing. Skipping send."
+fi
+
+# Cleanup
+rm -rf "$BACKUP_DIR"/*
+EOF
+
+    chmod +x "$script_file"
+}
+
 # ----- Install Backuper -----
 function install_backuper() {
     while true; do
@@ -336,8 +418,9 @@ function install_backuper() {
         echo " Select backup type"
         echo "========================================="
         echo
-        echo "1) Marzneshin"
-        echo "2) Pasarguard"
+        echo "[1] Marzneshin"
+        echo "[2] Pasarguard"
+        echo "[3] X-ui"
         echo
         echo "-----------------------------------------"
         read -p "Choose an option: " PANEL_OPTION
@@ -345,6 +428,7 @@ function install_backuper() {
         case "$PANEL_OPTION" in
             1) PANEL_TYPE="Marzneshin"; break ;;
             2) PANEL_TYPE="Pasarguard"; break ;;
+            3) PANEL_TYPE="X-ui"; break ;;
             *) echo "Invalid choice. Try again."; sleep 1 ;;
         esac
     done
@@ -383,8 +467,9 @@ function install_backuper() {
         *) COMP_TYPE="zip"; echo "Invalid. Default: zip" ;;
     esac
 
-    [[ "$PANEL_TYPE" == "Marzneshin" ]] && DEFAULT_CAPTION="Marzneshin Backup - $(date +"%Y-%m-%d %H:%M")"
-    [[ "$PANEL_TYPE" == "Pasarguard" ]] && DEFAULT_CAPTION="Pasarguard Backup - $(date +"%Y-%m-%d %H:%M")"
+[[ "$PANEL_TYPE" == "Marzneshin" ]] && DEFAULT_CAPTION="Marzneshin Backup - $(date +"%Y-%m-%d %H:%M")"
+[[ "$PANEL_TYPE" == "Pasarguard" ]] && DEFAULT_CAPTION="Pasarguard Backup - $(date +"%Y-%m-%d %H:%M")"
+[[ "$PANEL_TYPE" == "X-ui" ]] && DEFAULT_CAPTION="X-ui Backup - $(date +"%Y-%m-%d %H:%M")"
 
     echo -e "\nStep 4 - Enter File Caption"
     read -p "Caption File: " CAPTION
@@ -457,6 +542,21 @@ function install_backuper() {
         echo -e "\nBackup successfully sent"
         curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
              -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
+
+                     create_backup_script_x-ui "$DB_TYPE"
+        sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" /root/x-ui_backup.sh
+        sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/x-ui_backup.sh
+        sed -i "s|__CAPTION__|$CAPTION|g" /root/x-ui_backup.sh
+        sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/x-ui_backup.sh
+
+        (crontab -l 2>/dev/null | grep -v "x-ui_backup.sh"; echo "$CRON_TIME bash /root/x-ui_backup.sh") | crontab -
+        echo -e "\nStep 7 - Running first backup..."
+        bash /root/x-ui_backup.sh
+        
+        echo -e "\nBackup successfully sent"
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+             -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
+
     fi
 
     read -p "Press Enter to return to menu..."
